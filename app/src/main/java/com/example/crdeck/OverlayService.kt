@@ -94,7 +94,7 @@ class OverlayService : Service() {
         reader = r
     }
 
-    @Volatile private var lastCrop: Bitmap? = null
+    @Volatile private var lastCrop: Ocr.Crops? = null
     @Volatile private var lastCropAt = 0L
 
     // Держим свежий кусок экрана с ником (обновляем не чаще раза в ~0.8 с), поиск берёт его сразу
@@ -115,20 +115,26 @@ class OverlayService : Service() {
         }
     }
 
-    private fun grabCrop(img: Image): Bitmap {
-        val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
-        val top = prefs.getInt("top", 0).coerceIn(0, 95)
-        val bottom = prefs.getInt("bottom", 15).coerceIn(top + 3, 100)
-        val y0 = img.height * top / 100
-        val y1 = img.height * bottom / 100
+    // Ник и клан противника в бою стоят слева сверху; размеры считаем от ширины экрана
+    private fun grabCrop(img: Image): Ocr.Crops {
+        val w = img.width
         val pl = img.planes[0]
         val rowW = pl.rowStride / pl.pixelStride
-        val b = Bitmap.createBitmap(rowW, y1, Bitmap.Config.ARGB_8888)
+        val yEnd = (w * 0.215f).toInt().coerceAtMost(img.height)
+        val b = Bitmap.createBitmap(rowW, yEnd, Bitmap.Config.ARGB_8888)
         b.copyPixelsFromBuffer(pl.buffer)
-        return Bitmap.createBitmap(b, 0, y0, img.width, y1 - y0)
+        fun part(y0f: Float, y1f: Float): Bitmap {
+            val x0 = (w * 0.085f).toInt()
+            val x1 = (w * 0.46f).toInt()
+            val y0 = (w * y0f).toInt()
+            val y1 = (w * y1f).toInt().coerceAtMost(yEnd)
+            val c = Bitmap.createBitmap(b, x0, y0, x1 - x0, y1 - y0)
+            return Bitmap.createScaledBitmap(c, c.width * 2, c.height * 2, true)
+        }
+        return Ocr.Crops(part(0.083f, 0.146f), part(0.148f, 0.204f))
     }
 
-    private fun process(crop: Bitmap) {
+    private fun process(crop: Ocr.Crops) {
         val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
         setStatus("читаю экран…")
         val t0 = System.currentTimeMillis()

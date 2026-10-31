@@ -30,7 +30,29 @@ object DeckFinder {
         return c.inputStream.bufferedReader().use { it.readText() }
     }
 
-    fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+    // Без диакритики и регистра: n ň ñ ń = n, o ò ó ô = o и т.д.
+    fun norm(s: String): String {
+        val d = java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD).replace(Regex("\\p{Mn}+"), "")
+        val sb = StringBuilder()
+        for (c in d) {
+            when (c) {
+                'ø', 'Ø' -> sb.append('o')
+                'đ', 'Đ', 'ð', 'Ð' -> sb.append('d')
+                'ł', 'Ł' -> sb.append('l')
+                'ß' -> sb.append("ss")
+                'æ', 'Æ' -> sb.append("ae")
+                'œ', 'Œ' -> sb.append("oe")
+                'ı' -> sb.append('i')
+                else -> if (c.isLetterOrDigit()) sb.append(c.lowercaseChar())
+            }
+        }
+        return sb.toString()
+    }
+
+    // Ещё грубее: похожие символы, которые OCR путает (i, l, 1 — одно и то же; 0 и o — тоже)
+    private fun skel(s: String): String = norm(s).map {
+        when (it) { 'i', '1', 'l' -> 'l'; '0' -> 'o'; else -> it }
+    }.joinToString("")
 
     private fun lev(a: String, b: String): Int {
         var prev = IntArray(b.length + 1) { it }
@@ -46,7 +68,7 @@ object DeckFinder {
     }
 
     private fun similar(a: String, b: String): Boolean {
-        val x = norm(a); val y = norm(b)
+        val x = skel(a); val y = skel(b)
         if (x.isEmpty() || y.isEmpty()) return false
         return lev(x, y) <= maxOf(1, y.length / 4)
     }
@@ -76,7 +98,7 @@ object DeckFinder {
                 for (m in 0 until members.length()) {
                     val mem = members.getJSONObject(m)
                     if (similar(mem.getString("name"), nick)) {
-                        val sc = lev(norm(mem.getString("name")), norm(nick))
+                        val sc = lev(skel(mem.getString("name")), skel(nick))
                         if (sc < bestScore) { bestScore = sc; best = mem.getString("tag") }
                     }
                 }
@@ -99,11 +121,11 @@ object DeckFinder {
         for (u in urls) {
             val res = site(u)
             if (res.isEmpty()) continue
-            val pre = res.filter { norm(it.second).contains(norm(nick)) }.ifEmpty { res.take(5) }.take(8)
+            val pre = res.filter { skel(it.second).contains(skel(nick)) }.ifEmpty { res.take(5) }.take(8)
             val ok = ArrayList<Pair<String, Int>>()
             for ((tag, _) in pre) {
                 val name = playerName(key, tag) ?: continue
-                if (similar(name, nick)) ok.add(tag to lev(norm(name), norm(nick)))
+                if (similar(name, nick)) ok.add(tag to lev(skel(name), skel(nick)))
             }
             if (ok.isEmpty()) continue
             val min = ok.minOf { it.second }

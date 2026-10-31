@@ -3,6 +3,7 @@ package com.example.crdeck
 import android.graphics.Bitmap
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
@@ -11,6 +12,9 @@ import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
 object Ocr {
+    /** Два куска экрана: строка с ником и строка с кланом (уже увеличенные). */
+    class Crops(val nick: Bitmap, val clan: Bitmap)
+
     // Быстрый распознаватель: латиница
     private val latin by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     // Медленные: китайский, японский, корейский, деванагари (только если быстрый не помог)
@@ -23,12 +27,14 @@ object Ocr {
         )
     }
 
-    private val skip = Regex("^[\\d:\\s.,/+\\-]+$")
+    private fun linesOf(t: Text): List<String> =
+        t.textBlocks.flatMap { b -> b.lines }.map { l -> l.text.trim() }
 
-    private fun clean(lines: List<String>) = lines.map { it.trim() }
-        .filter { it.length >= 2 && !skip.matches(it) && it.any { c -> c.isLetter() } }
+    // из всех прочитанных строк берём самую «содержательную»
+    private fun best(lines: List<String>): String? =
+        lines.filter { l -> l.any { it.isLetterOrDigit() } }
+            .maxByOrNull { l -> l.count { it.isLetterOrDigit() } }
 
-    /** Прогрев быстрого распознавателя при запуске. */
     fun warmUp() {
         try {
             val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
@@ -36,24 +42,22 @@ object Ocr {
         } catch (_: Exception) {}
     }
 
-    /** Варианты (ник, клан?). extra=false — только быстрый (латиница), true — остальные языки. */
-    fun candidates(bmp: Bitmap, extra: Boolean): List<Pair<String, String?>> {
-        val img = InputImage.fromBitmap(bmp, 0)
+    /** Варианты (ник, клан?). extra=false — быстрый (латиница), true — остальные языки. */
+    fun candidates(c: Crops, extra: Boolean): List<Pair<String, String?>> {
         val recs = if (extra) others else listOf(latin)
-        val tasks = recs.map { it.process(img) }
-        val sets = ArrayList<List<String>>()
-        for (t in tasks) {
-            try {
-                val r = Tasks.await(t)
-                sets.add(clean(r.textBlocks.flatMap { b -> b.lines }.map { l -> l.text }))
-            } catch (_: Exception) {}
-        }
+        val ni = InputImage.fromBitmap(c.nick, 0)
+        val ci = InputImage.fromBitmap(c.clan, 0)
+        val nt = recs.map { it.process(ni) }
+        val ct = recs.map { it.process(ci) }
         val out = LinkedHashMap<String, Pair<String, String?>>()
         val cnt = HashMap<String, Int>()
-        for (ls in sets) {
-            val nick = ls.getOrNull(0) ?: continue
-            if (DeckFinder.norm(nick).isEmpty()) continue
-            val clan = ls.getOrNull(1)?.takeUnless { DeckFinder.isNoClan(it) }
+        for (i in recs.indices) {
+            var nick: String? = null
+            var clanRaw: String? = null
+            try { nick = best(linesOf(Tasks.await(nt[i]))) } catch (_: Exception) {}
+            try { clanRaw = best(linesOf(Tasks.await(ct[i]))) } catch (_: Exception) {}
+            if (nick == null || DeckFinder.norm(nick).isEmpty()) continue
+            val clan = clanRaw?.takeUnless { DeckFinder.isNoClan(it) }
             val k = DeckFinder.norm(nick) + "|" + DeckFinder.norm(clan ?: "")
             cnt[k] = (cnt[k] ?: 0) + 1
             out.putIfAbsent(k, nick to clan)
