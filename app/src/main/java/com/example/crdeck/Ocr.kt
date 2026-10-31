@@ -48,7 +48,7 @@ object Ocr {
         try {
             if (!api.init(ctx.filesDir.absolutePath, "rus+ara+eng")) return emptyList()
             api.setImage(bmp)
-            return (api.utf8Text ?: "").split("\n")
+            return (api.getUTF8Text() ?: "").split("\n")
         } finally {
             api.recycle()
         }
