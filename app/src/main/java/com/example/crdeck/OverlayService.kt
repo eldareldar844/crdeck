@@ -36,6 +36,7 @@ class OverlayService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
     @Volatile private var want = false
+    private var web: WebView? = null
     private lateinit var status: TextView
     private lateinit var deckView: ImageView
 
@@ -57,6 +58,12 @@ class OverlayService : Service() {
         if (data == null || root != null) { if (data == null) stopSelf(); return START_NOT_STICKY }
         setupCapture(code, data)
         buildOverlay()
+        bg.execute { Ocr.warmUp() }
+        val wv = WebView(this)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.loadUrl("https://royaleapi.com/")
+        web = wv
         return START_NOT_STICKY
     }
 
@@ -112,15 +119,17 @@ class OverlayService : Service() {
         val y1 = bmp.height * bottom / 100
         val crop = Bitmap.createBitmap(bmp, 0, y0, bmp.width, y1 - y0)
         setStatus("читаю экран…")
+        val t0 = System.currentTimeMillis()
         bg.execute {
             try {
-                val cands = Ocr.candidates(this, crop) { setStatus(it) }
+                val cands = Ocr.candidates(crop)
                 if (cands.isEmpty()) { setStatus("ник не найден"); return@execute }
                 setStatus("${cands[0].first} | ${cands[0].second ?: "нет клана"}")
                 val key = prefs.getString("key", "") ?: ""
-                val cards = DeckFinder.find(key, cands) { url -> webSearch(url) }
+                val cards = DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
                 val deck = DeckImage.compose(cards)
-                main.post { showDeck(deck) }
+                val sec = (System.currentTimeMillis() - t0) / 1000
+                main.post { showDeck(deck, sec) }
             } catch (e: Exception) {
                 setStatus("✖ ${e.message}")
             }
@@ -130,18 +139,16 @@ class OverlayService : Service() {
     private val jsLinks = "(function(){return JSON.stringify(Array.from(document.querySelectorAll('a[href]'))" +
         ".map(function(a){return [a.getAttribute('href'),(a.textContent||'').trim()]}))})()"
 
-    // Загружает страницу поиска RoyaleAPI в скрытом WebView (проходит защиту сайта) и возвращает (#тег, текст ссылки)
+    // Поиск на RoyaleAPI через уже открытый скрытый WebView (защита сайта пройдена при старте)
     private fun webSearch(url: String): List<Pair<String, String>> {
         val latch = CountDownLatch(1)
         val out = ArrayList<Pair<String, String>>()
         main.post {
-            val wv = WebView(this)
-            wv.settings.javaScriptEnabled = true
-            wv.settings.domStorageEnabled = true
+            val wv = web
+            if (wv == null) { latch.countDown(); return@post }
             var started = false
             var tries = 0
             val tagRe = Regex("^/player/([0289PYLQGRJCUV]{3,})/?$")
-            fun finish() { try { wv.destroy() } catch (_: Exception) {}; latch.countDown() }
             fun poll() {
                 wv.evaluateJavascript(jsLinks) { v ->
                     try {
@@ -154,7 +161,7 @@ class OverlayService : Service() {
                         }
                     } catch (_: Exception) {}
                     tries++
-                    if (out.isNotEmpty() || tries > 10) finish() else main.postDelayed({ poll() }, 1000)
+                    if (out.isNotEmpty() || tries > 8) latch.countDown() else main.postDelayed({ poll() }, 700)
                 }
             }
             wv.webViewClient = object : WebViewClient() {
@@ -164,18 +171,18 @@ class OverlayService : Service() {
             }
             wv.loadUrl(url)
         }
-        latch.await(30, TimeUnit.SECONDS)
+        latch.await(20, TimeUnit.SECONDS)
         return ArrayList(out)
     }
 
     private fun setStatus(t: String) { main.post { status.text = t } }
 
-    private fun showDeck(b: Bitmap) {
+    private fun showDeck(b: Bitmap, sec: Long) {
         val w = dp(230)
         deckView.layoutParams = LinearLayout.LayoutParams(w, w * b.height / b.width)
         deckView.setImageBitmap(b)
         deckView.visibility = View.VISIBLE
-        status.text = "тап по колоде — скрыть"
+        status.text = "готово за ${sec}с, тап по колоде — скрыть"
     }
 
     private fun buildOverlay() {
@@ -231,6 +238,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         root?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         root = null
+        try { web?.destroy() } catch (_: Exception) {}
         vd?.release(); reader?.close(); projection?.stop()
         bg.shutdown()
         super.onDestroy()

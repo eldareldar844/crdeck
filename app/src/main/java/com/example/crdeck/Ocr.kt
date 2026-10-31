@@ -1,6 +1,5 @@
 package com.example.crdeck
 
-import android.content.Context
 import android.graphics.Bitmap
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
@@ -10,12 +9,9 @@ import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import java.io.File
-import java.net.URL
 
 object Ocr {
-    // ML Kit: латиница, китайский, японский, корейский, деванагари.
-    // Tesseract: русский, арабский, английский (ML Kit их не умеет).
+    // ML Kit: латиница, китайский, японский, корейский, деванагари
     private val recs by lazy {
         listOf(
             TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS),
@@ -31,18 +27,27 @@ object Ocr {
     private fun clean(lines: List<String>) = lines.map { it.trim() }
         .filter { it.length >= 2 && !skip.matches(it) && it.any { c -> c.isLetter() } }
 
+    /** Прогрев моделей при запуске, чтобы первый поиск не тормозил. */
+    fun warmUp() {
+        try {
+            val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+            val img = InputImage.fromBitmap(b, 0)
+            val tasks = recs.map { it.process(img) }
+            for (t in tasks) { try { Tasks.await(t) } catch (_: Exception) {} }
+        } catch (_: Exception) {}
+    }
 
-    /** Возвращает варианты (ник, клан?) от разных распознавателей, лучшие — первыми. */
-    fun candidates(ctx: Context, bmp: Bitmap, progress: (String) -> Unit): List<Pair<String, String?>> {
+    /** Варианты (ник, клан?) от разных распознавателей, лучшие — первыми. */
+    fun candidates(bmp: Bitmap): List<Pair<String, String?>> {
+        val img = InputImage.fromBitmap(bmp, 0)
+        val tasks = recs.map { it.process(img) } // все распознаватели работают параллельно
         val sets = ArrayList<List<String>>()
-        progress("читаю экран…")
-        for (r in recs) {
+        for (t in tasks) {
             try {
-                val t = Tasks.await(r.process(InputImage.fromBitmap(bmp, 0)))
-                sets.add(clean(t.textBlocks.flatMap { b -> b.lines }.map { l -> l.text }))
+                val r = Tasks.await(t)
+                sets.add(clean(r.textBlocks.flatMap { b -> b.lines }.map { l -> l.text }))
             } catch (_: Exception) {}
         }
-
         val out = LinkedHashMap<String, Pair<String, String?>>()
         val cnt = HashMap<String, Int>()
         for (ls in sets) {
@@ -53,6 +58,6 @@ object Ocr {
             cnt[k] = (cnt[k] ?: 0) + 1
             out.putIfAbsent(k, nick to clan)
         }
-        return out.entries.sortedByDescending { cnt[it.key] ?: 0 }.map { it.value }.take(6)
+        return out.entries.sortedByDescending { cnt[it.key] ?: 0 }.map { it.value }.take(5)
     }
 }

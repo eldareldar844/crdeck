@@ -9,6 +9,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class Card(val name: String, val icon: String)
 
@@ -17,6 +18,7 @@ object DeckFinder {
     private const val BASE = "https://proxy.royaleapi.dev/v1"
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+    private val pool = Executors.newCachedThreadPool()
 
     private fun get(url: String, key: String?): String {
         val c = URL(url).openConnection() as HttpURLConnection
@@ -63,21 +65,25 @@ object DeckFinder {
 
     private fun findInClan(key: String, nick: String, clan: String): String? {
         val items = JSONObject(get("$BASE/clans?name=${enc(clan)}&limit=5", key)).getJSONArray("items")
-        for (i in 0 until items.length()) {
-            val tag = items.getJSONObject(i).getString("tag")
-            val members = JSONObject(get("$BASE/clans/${enc(tag)}", key)).getJSONArray("memberList")
-            var best: String? = null
-            var bestScore = Int.MAX_VALUE
-            for (m in 0 until members.length()) {
-                val mem = members.getJSONObject(m)
-                if (similar(mem.getString("name"), nick)) {
-                    val s = lev(norm(mem.getString("name")), norm(nick))
-                    if (s < bestScore) { bestScore = s; best = mem.getString("tag") }
+        val n = minOf(items.length(), 3)
+        if (n == 0) return null
+        val jobs = (0 until n).map { i ->
+            Callable<String> {
+                val tag = items.getJSONObject(i).getString("tag")
+                val members = JSONObject(get("$BASE/clans/${enc(tag)}", key)).getJSONArray("memberList")
+                var best: String? = null
+                var bestScore = Int.MAX_VALUE
+                for (m in 0 until members.length()) {
+                    val mem = members.getJSONObject(m)
+                    if (similar(mem.getString("name"), nick)) {
+                        val sc = lev(norm(mem.getString("name")), norm(nick))
+                        if (sc < bestScore) { bestScore = sc; best = mem.getString("tag") }
+                    }
                 }
+                best ?: throw Exception("no")
             }
-            if (best != null) return best
         }
-        return null
+        return try { pool.invokeAny(jobs, 12, TimeUnit.SECONDS) } catch (e: Exception) { null }
     }
 
     private fun playerName(key: String, tag: String): String? =
@@ -115,18 +121,23 @@ object DeckFinder {
     fun find(
         key: String,
         cands: List<Pair<String, String?>>,
-        site: (String) -> List<Pair<String, String>>
+        site: (String) -> List<Pair<String, String>>,
+        status: (String) -> Unit
     ): List<Card> {
         if (key.isBlank()) throw Exception("нет API ключа")
         var tag: String? = null
-        for ((nick, clan) in cands) {
-            if (clan.isNullOrBlank()) continue
-            tag = try { findInClan(key, nick, clan) } catch (e: Exception) { null }
-            if (tag != null) break
+        val withClan = cands.filter { !it.second.isNullOrBlank() }.take(3)
+        if (withClan.isNotEmpty()) {
+            status("ищу в клане…")
+            val jobs = withClan.map { c ->
+                Callable<String> { findInClan(key, c.first, c.second!!) ?: throw Exception("no") }
+            }
+            tag = try { pool.invokeAny(jobs, 15, TimeUnit.SECONDS) } catch (e: Exception) { null }
         }
         if (tag == null) {
-            for ((nick, _) in cands.distinctBy { norm(it.first) }.take(3)) {
-                tag = try { findGlobal(key, nick, site) } catch (e: Exception) { null }
+            status("ищу на сайте…")
+            for (c in cands.distinctBy { norm(it.first) }.take(2)) {
+                tag = try { findGlobal(key, c.first, site) } catch (e: Exception) { null }
                 if (tag != null) break
             }
         }
