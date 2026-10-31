@@ -11,10 +11,11 @@ import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
 object Ocr {
-    // ML Kit: латиница, китайский, японский, корейский, деванагари
-    private val recs by lazy {
+    // Быстрый распознаватель: латиница
+    private val latin by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+    // Медленные: китайский, японский, корейский, деванагари (только если быстрый не помог)
+    private val others by lazy {
         listOf(
-            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS),
             TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()),
             TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build()),
             TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build()),
@@ -27,20 +28,19 @@ object Ocr {
     private fun clean(lines: List<String>) = lines.map { it.trim() }
         .filter { it.length >= 2 && !skip.matches(it) && it.any { c -> c.isLetter() } }
 
-    /** Прогрев моделей при запуске, чтобы первый поиск не тормозил. */
+    /** Прогрев быстрого распознавателя при запуске. */
     fun warmUp() {
         try {
             val b = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
-            val img = InputImage.fromBitmap(b, 0)
-            val tasks = recs.map { it.process(img) }
-            for (t in tasks) { try { Tasks.await(t) } catch (_: Exception) {} }
+            Tasks.await(latin.process(InputImage.fromBitmap(b, 0)))
         } catch (_: Exception) {}
     }
 
-    /** Варианты (ник, клан?) от разных распознавателей, лучшие — первыми. */
-    fun candidates(bmp: Bitmap): List<Pair<String, String?>> {
+    /** Варианты (ник, клан?). extra=false — только быстрый (латиница), true — остальные языки. */
+    fun candidates(bmp: Bitmap, extra: Boolean): List<Pair<String, String?>> {
         val img = InputImage.fromBitmap(bmp, 0)
-        val tasks = recs.map { it.process(img) } // все распознаватели работают параллельно
+        val recs = if (extra) others else listOf(latin)
+        val tasks = recs.map { it.process(img) }
         val sets = ArrayList<List<String>>()
         for (t in tasks) {
             try {

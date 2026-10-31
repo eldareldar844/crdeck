@@ -94,39 +94,64 @@ class OverlayService : Service() {
         reader = r
     }
 
+    @Volatile private var lastCrop: Bitmap? = null
+    @Volatile private var lastCropAt = 0L
+
+    // Держим свежий кусок экрана с ником (обновляем не чаще раза в ~0.8 с), поиск берёт его сразу
     private fun onFrame(rd: ImageReader) {
         val img: Image? = try { rd.acquireLatestImage() } catch (e: Exception) { null }
         if (img == null) return
-        if (!want) { img.close(); return }
-        want = false
-        val bmp = try { toBitmap(img) } finally { img.close() }
-        process(bmp)
+        try {
+            val now = System.currentTimeMillis()
+            if (now - lastCropAt >= 800 || want) {
+                val c = grabCrop(img)
+                lastCrop = c
+                lastCropAt = now
+                if (want) { want = false; process(c) }
+            }
+        } catch (_: Exception) {
+        } finally {
+            img.close()
+        }
     }
 
-    private fun toBitmap(img: Image): Bitmap {
-        val pl = img.planes[0]
-        val rowPad = pl.rowStride - pl.pixelStride * img.width
-        val b = Bitmap.createBitmap(img.width + rowPad / pl.pixelStride, img.height, Bitmap.Config.ARGB_8888)
-        b.copyPixelsFromBuffer(pl.buffer)
-        return Bitmap.createBitmap(b, 0, 0, img.width, img.height)
-    }
-
-    private fun process(bmp: Bitmap) {
+    private fun grabCrop(img: Image): Bitmap {
         val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
         val top = prefs.getInt("top", 0).coerceIn(0, 95)
         val bottom = prefs.getInt("bottom", 15).coerceIn(top + 3, 100)
-        val y0 = bmp.height * top / 100
-        val y1 = bmp.height * bottom / 100
-        val crop = Bitmap.createBitmap(bmp, 0, y0, bmp.width, y1 - y0)
+        val y0 = img.height * top / 100
+        val y1 = img.height * bottom / 100
+        val pl = img.planes[0]
+        val rowW = pl.rowStride / pl.pixelStride
+        val b = Bitmap.createBitmap(rowW, y1, Bitmap.Config.ARGB_8888)
+        b.copyPixelsFromBuffer(pl.buffer)
+        return Bitmap.createBitmap(b, 0, y0, img.width, y1 - y0)
+    }
+
+    private fun process(crop: Bitmap) {
+        val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
         setStatus("читаю экран…")
         val t0 = System.currentTimeMillis()
         bg.execute {
             try {
-                val cands = Ocr.candidates(crop)
+                val key = prefs.getString("key", "") ?: ""
+                var cands = Ocr.candidates(crop, false)
+                if (cands.isEmpty()) {
+                    setStatus("читаю другие языки…")
+                    cands = Ocr.candidates(crop, true)
+                }
                 if (cands.isEmpty()) { setStatus("ник не найден"); return@execute }
                 setStatus("${cands[0].first} | ${cands[0].second ?: "нет клана"}")
-                val key = prefs.getString("key", "") ?: ""
-                val cards = DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
+                val cards = try {
+                    DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
+                } catch (e: Exception) {
+                    if (e.message != "игрок не найден") throw e
+                    setStatus("читаю другие языки…")
+                    val c2 = Ocr.candidates(crop, true)
+                    if (c2.isEmpty()) throw e
+                    setStatus("${c2[0].first} | ${c2[0].second ?: "нет клана"}")
+                    DeckFinder.find(key, c2, { url -> webSearch(url) }, { setStatus(it) })
+                }
                 val deck = DeckImage.compose(cards)
                 val sec = (System.currentTimeMillis() - t0) / 1000
                 main.post { showDeck(deck, sec) }
@@ -161,7 +186,7 @@ class OverlayService : Service() {
                         }
                     } catch (_: Exception) {}
                     tries++
-                    if (out.isNotEmpty() || tries > 8) latch.countDown() else main.postDelayed({ poll() }, 700)
+                    if (out.isNotEmpty() || tries > 4) latch.countDown() else main.postDelayed({ poll() }, 700)
                 }
             }
             wv.webViewClient = object : WebViewClient() {
@@ -171,7 +196,7 @@ class OverlayService : Service() {
             }
             wv.loadUrl(url)
         }
-        latch.await(20, TimeUnit.SECONDS)
+        latch.await(10, TimeUnit.SECONDS)
         return ArrayList(out)
     }
 
@@ -188,7 +213,11 @@ class OverlayService : Service() {
     private fun buildOverlay() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(190, 0, 0, 0))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.argb(210, 10, 14, 26))
+                cornerRadius = dp(10).toFloat()
+                setStroke(dp(1), Color.argb(120, 124, 92, 255))
+            }
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -196,7 +225,18 @@ class OverlayService : Service() {
         val go = Button(this).apply {
             text = "🔍"; textSize = 14f; minWidth = 0; minimumWidth = 0
             setPadding(dp(8), 0, dp(8), 0)
-            setOnClickListener { want = true; setStatus("жду кадр…") }
+            setOnClickListener {
+                val c = lastCrop
+                if (c != null) {
+                    process(c)
+                } else {
+                    want = true
+                    setStatus("жду кадр…")
+                    main.postDelayed({
+                        if (want) { want = false; setStatus("нет кадров от экрана") }
+                    }, 4000)
+                }
+            }
         }
         status = TextView(this).apply { text = "готов"; textSize = 10f; setTextColor(Color.WHITE); maxWidth = dp(140); setPadding(dp(6), 0, dp(6), 0) }
         val close = TextView(this).apply {
@@ -210,6 +250,10 @@ class OverlayService : Service() {
         }
         row.addView(handle); row.addView(go); row.addView(status); row.addView(close)
         box.addView(row); box.addView(deckView)
+        box.addView(TextView(this).apply {
+            text = "eurus cr"; textSize = 8f; gravity = Gravity.END
+            setTextColor(Color.argb(140, 255, 255, 255)); setPadding(0, 0, dp(6), 0)
+        })
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,

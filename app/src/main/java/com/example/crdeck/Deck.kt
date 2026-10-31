@@ -95,10 +95,7 @@ object DeckFinder {
 
     // Поиск без клана: поиск по имени на сайте RoyaleAPI (через WebView, его даёт сервис)
     private fun findGlobal(key: String, nick: String, site: (String) -> List<Pair<String, String>>): String? {
-        val urls = listOf(
-            "https://royaleapi.com/player/${Uri.encode(nick)}",
-            "https://royaleapi.com/players/search?q=${enc(nick)}"
-        )
+        val urls = listOf("https://royaleapi.com/player/${Uri.encode(nick)}")
         for (u in urls) {
             val res = site(u)
             if (res.isEmpty()) continue
@@ -136,7 +133,7 @@ object DeckFinder {
         }
         if (tag == null) {
             status("ищу на сайте…")
-            for (c in cands.distinctBy { norm(it.first) }.take(2)) {
+            for (c in cands.distinctBy { norm(it.first) }.take(1)) {
                 tag = try { findGlobal(key, c.first, site) } catch (e: Exception) { null }
                 if (tag != null) break
             }
