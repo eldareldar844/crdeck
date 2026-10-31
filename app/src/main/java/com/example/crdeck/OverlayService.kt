@@ -141,23 +141,14 @@ class OverlayService : Service() {
         bg.execute {
             try {
                 val key = prefs.getString("key", "") ?: ""
-                var cands = Ocr.candidates(crop, false)
+                val cands = Ocr.candidates(crop)
                 if (cands.isEmpty()) {
-                    setStatus("читаю другие языки…")
-                    cands = Ocr.candidates(crop, true)
+                    val dbg = Ocr.debugImage(crop)
+                    main.post { showDebug(dbg) }
+                    return@execute
                 }
-                if (cands.isEmpty()) { setStatus("ник не найден"); return@execute }
                 setStatus("${cands[0].first} | ${cands[0].second ?: "нет клана"}")
-                val cards = try {
-                    DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
-                } catch (e: Exception) {
-                    if (e.message != "игрок не найден") throw e
-                    setStatus("читаю другие языки…")
-                    val c2 = Ocr.candidates(crop, true)
-                    if (c2.isEmpty()) throw e
-                    setStatus("${c2[0].first} | ${c2[0].second ?: "нет клана"}")
-                    DeckFinder.find(key, c2, { url -> webSearch(url) }, { setStatus(it) })
-                }
+                val cards = DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
                 val deck = DeckImage.compose(cards)
                 val sec = (System.currentTimeMillis() - t0) / 1000
                 main.post { showDeck(deck, sec) }
@@ -207,6 +198,14 @@ class OverlayService : Service() {
     }
 
     private fun setStatus(t: String) { main.post { status.text = t } }
+
+    private fun showDebug(b: Bitmap) {
+        val w = dp(230)
+        deckView.layoutParams = LinearLayout.LayoutParams(w, w * b.height / b.width)
+        deckView.setImageBitmap(b)
+        deckView.visibility = View.VISIBLE
+        status.text = "ник не найден — вот что вижу"
+    }
 
     private fun showDeck(b: Bitmap, sec: Long) {
         val w = dp(230)

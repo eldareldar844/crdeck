@@ -21,9 +21,5 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.mlkit:text-recognition:16.0.0")
-    implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
-    implementation("com.google.mlkit:text-recognition-japanese:16.0.0")
-    implementation("com.google.mlkit:text-recognition-korean:16.0.0")
-    implementation("com.google.mlkit:text-recognition-devanagari:16.0.0")
     implementation("com.google.android.gms:play-services-tasks:18.2.0")
 }
