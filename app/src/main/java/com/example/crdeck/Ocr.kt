@@ -10,7 +10,6 @@ import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import com.googlecode.tesseract.android.TessBaseAPI
 import java.io.File
 import java.net.URL
 
@@ -32,27 +31,6 @@ object Ocr {
     private fun clean(lines: List<String>) = lines.map { it.trim() }
         .filter { it.length >= 2 && !skip.matches(it) && it.any { c -> c.isLetter() } }
 
-    private fun tess(ctx: Context, bmp: Bitmap): List<String> {
-        val dir = File(ctx.filesDir, "tessdata")
-        dir.mkdirs()
-        for (l in listOf("eng", "rus", "ara")) {
-            val f = File(dir, "$l.traineddata")
-            if (!f.exists() || f.length() < 1000) {
-                val tmp = File(dir, "$l.tmp")
-                URL("https://github.com/tesseract-ocr/tessdata_fast/raw/main/$l.traineddata")
-                    .openStream().use { i -> tmp.outputStream().use { o -> i.copyTo(o) } }
-                tmp.renameTo(f)
-            }
-        }
-        val api = TessBaseAPI()
-        try {
-            if (!api.init(ctx.filesDir.absolutePath, "rus+ara+eng")) return emptyList()
-            api.setImage(bmp)
-            return (api.getUTF8Text() ?: "").split("\n")
-        } finally {
-            api.recycle()
-        }
-    }
 
     /** Возвращает варианты (ник, клан?) от разных распознавателей, лучшие — первыми. */
     fun candidates(ctx: Context, bmp: Bitmap, progress: (String) -> Unit): List<Pair<String, String?>> {
@@ -64,8 +42,6 @@ object Ocr {
                 sets.add(clean(t.textBlocks.flatMap { b -> b.lines }.map { l -> l.text }))
             } catch (_: Exception) {}
         }
-        progress("читаю (рус/араб)…")
-        try { sets.add(clean(tess(ctx, bmp))) } catch (_: Exception) {}
 
         val out = LinkedHashMap<String, Pair<String, String?>>()
         val cnt = HashMap<String, Int>()
