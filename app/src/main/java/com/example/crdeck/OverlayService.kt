@@ -7,6 +7,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
@@ -20,12 +21,10 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.*
 import android.widget.*
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import org.json.JSONArray
-import java.util.concurrent.CountDownLatch
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
@@ -35,8 +34,8 @@ class OverlayService : Service() {
     private var vd: VirtualDisplay? = null
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
+    private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     @Volatile private var want = false
-    private var web: WebView? = null
     private lateinit var status: TextView
     private lateinit var deckView: ImageView
 
@@ -58,12 +57,6 @@ class OverlayService : Service() {
         if (data == null || root != null) { if (data == null) stopSelf(); return START_NOT_STICKY }
         setupCapture(code, data)
         buildOverlay()
-        bg.execute { Ocr.warmUp() }
-        val wv = WebView(this)
-        wv.settings.javaScriptEnabled = true
-        wv.settings.domStorageEnabled = true
-        wv.loadUrl("https://royaleapi.com/")
-        web = wv
         return START_NOT_STICKY
     }
 
@@ -94,10 +87,10 @@ class OverlayService : Service() {
         reader = r
     }
 
-    @Volatile private var lastCrop: Ocr.Crops? = null
+    @Volatile private var lastCrop: Bitmap? = null
     @Volatile private var lastCropAt = 0L
 
-    // Держим свежий кусок экрана с ником (обновляем не чаще раза в ~0.8 с), поиск берёт его сразу
+    // Держим свежий кусок экрана с ником (обновляем не чаще раза в ~0.8 с), кнопка берёт его сразу
     private fun onFrame(rd: ImageReader) {
         val img: Image? = try { rd.acquireLatestImage() } catch (e: Exception) { null }
         if (img == null) return
@@ -115,110 +108,58 @@ class OverlayService : Service() {
         }
     }
 
-    // Ник и клан противника в бою стоят слева сверху; размеры считаем от ширины экрана
-    private fun grabCrop(img: Image): Ocr.Crops {
-        val w = img.width
+    private fun grabCrop(img: Image): Bitmap {
+        val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
+        val top = prefs.getInt("top", 0).coerceIn(0, 95)
+        val bottom = prefs.getInt("bottom", 15).coerceIn(top + 3, 100)
+        val y0 = img.height * top / 100
+        val y1 = img.height * bottom / 100
         val pl = img.planes[0]
         val rowW = pl.rowStride / pl.pixelStride
-        val yEnd = (w * 0.215f).toInt().coerceAtMost(img.height)
-        val b = Bitmap.createBitmap(rowW, yEnd, Bitmap.Config.ARGB_8888)
+        val b = Bitmap.createBitmap(rowW, y1, Bitmap.Config.ARGB_8888)
         b.copyPixelsFromBuffer(pl.buffer)
-        fun part(y0f: Float, y1f: Float): Bitmap {
-            val x0 = (w * 0.085f).toInt()
-            val x1 = (w * 0.46f).toInt()
-            val y0 = (w * y0f).toInt()
-            val y1 = (w * y1f).toInt().coerceAtMost(yEnd)
-            val c = Bitmap.createBitmap(b, x0, y0, x1 - x0, y1 - y0)
-            return Bitmap.createScaledBitmap(c, c.width * 2, c.height * 2, true)
-        }
-        return Ocr.Crops(part(0.083f, 0.146f), part(0.148f, 0.204f))
+        return Bitmap.createBitmap(b, 0, y0, img.width, y1 - y0)
     }
 
-    private fun process(crop: Ocr.Crops) {
+    private fun process(crop: Bitmap) {
         val prefs = getSharedPreferences("cr", Context.MODE_PRIVATE)
         setStatus("читаю экран…")
-        val t0 = System.currentTimeMillis()
-        bg.execute {
-            try {
+        recognizer.process(InputImage.fromBitmap(crop, 0))
+            .addOnSuccessListener { res ->
+                val lines = res.textBlocks.flatMap { it.lines }.map { it.text.trim() }
+                    .filter { it.length >= 2 && !Regex("^[\\d:\\s.,/]+$").matches(it) }
+                val nick = lines.getOrNull(0)
+                val clan = lines.getOrNull(1)
+                if (nick == null) { setStatus("ник не найден"); return@addOnSuccessListener }
+                setStatus("$nick | ${clan ?: "—"}")
                 val key = prefs.getString("key", "") ?: ""
-                val cands = Ocr.candidates(crop)
-                if (cands.isEmpty()) {
-                    val dbg = Ocr.debugImage(crop)
-                    main.post { showDebug(dbg) }
-                    return@execute
-                }
-                setStatus("${cands[0].first} | ${cands[0].second ?: "нет клана"}")
-                val cards = DeckFinder.find(key, cands, { url -> webSearch(url) }, { setStatus(it) })
-                val deck = DeckImage.compose(cards)
-                val sec = (System.currentTimeMillis() - t0) / 1000
-                main.post { showDeck(deck, sec) }
-            } catch (e: Exception) {
-                setStatus("✖ ${e.message}")
-            }
-        }
-    }
-
-    private val jsLinks = "(function(){return JSON.stringify(Array.from(document.querySelectorAll('a[href]'))" +
-        ".map(function(a){return [a.getAttribute('href'),(a.textContent||'').trim()]}))})()"
-
-    // Поиск на RoyaleAPI через уже открытый скрытый WebView (защита сайта пройдена при старте)
-    private fun webSearch(url: String): List<Pair<String, String>> {
-        val latch = CountDownLatch(1)
-        val out = ArrayList<Pair<String, String>>()
-        main.post {
-            val wv = web
-            if (wv == null) { latch.countDown(); return@post }
-            var started = false
-            var tries = 0
-            val tagRe = Regex("^/player/([0289PYLQGRJCUV]{3,})/?$")
-            fun poll() {
-                wv.evaluateJavascript(jsLinks) { v ->
+                bg.execute {
                     try {
-                        val arr = JSONArray(JSONArray("[$v]").getString(0))
-                        val seen = HashSet<String>()
-                        for (i in 0 until arr.length()) {
-                            val a = arr.getJSONArray(i)
-                            val m = tagRe.find(a.getString(0)) ?: continue
-                            if (seen.add(m.groupValues[1])) out.add(("#" + m.groupValues[1]) to a.getString(1))
-                        }
-                    } catch (_: Exception) {}
-                    tries++
-                    if (out.isNotEmpty() || tries > 4) latch.countDown() else main.postDelayed({ poll() }, 700)
+                        val cards = DeckFinder.find(key, nick, clan)
+                        val deck = DeckImage.compose(cards)
+                        main.post { showDeck(deck) }
+                    } catch (e: Exception) {
+                        setStatus("✖ ${e.message}")
+                    }
                 }
             }
-            wv.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, u: String?) {
-                    if (!started) { started = true; poll() }
-                }
-            }
-            wv.loadUrl(url)
-        }
-        latch.await(10, TimeUnit.SECONDS)
-        return ArrayList(out)
+            .addOnFailureListener { setStatus("ошибка OCR") }
     }
 
     private fun setStatus(t: String) { main.post { status.text = t } }
 
-    private fun showDebug(b: Bitmap) {
+    private fun showDeck(b: Bitmap) {
         val w = dp(230)
         deckView.layoutParams = LinearLayout.LayoutParams(w, w * b.height / b.width)
         deckView.setImageBitmap(b)
         deckView.visibility = View.VISIBLE
-        status.text = "ник не найден — вот что вижу"
-    }
-
-    private fun showDeck(b: Bitmap, sec: Long) {
-        val w = dp(230)
-        deckView.layoutParams = LinearLayout.LayoutParams(w, w * b.height / b.width)
-        deckView.setImageBitmap(b)
-        deckView.visibility = View.VISIBLE
-        status.text = "готово за ${sec}с, тап по колоде — скрыть"
+        status.text = "тап по колоде — скрыть"
     }
 
     private fun buildOverlay() {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = android.graphics.drawable.GradientDrawable().apply {
+            background = GradientDrawable().apply {
                 setColor(Color.argb(210, 10, 14, 26))
                 cornerRadius = dp(10).toFloat()
                 setStroke(dp(1), Color.argb(120, 124, 92, 255))
@@ -287,7 +228,6 @@ class OverlayService : Service() {
     override fun onDestroy() {
         root?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         root = null
-        try { web?.destroy() } catch (_: Exception) {}
         vd?.release(); reader?.close(); projection?.stop()
         bg.shutdown()
         super.onDestroy()

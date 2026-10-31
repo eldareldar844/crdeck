@@ -21,6 +21,8 @@ import android.widget.*
 
 class MainActivity : Activity() {
     private lateinit var keyEt: EditText
+    private lateinit var topEt: EditText
+    private lateinit var botEt: EditText
     private lateinit var permTv: TextView
 
     private val cBg1 = Color.parseColor("#0A0E1A")
@@ -156,6 +158,26 @@ class MainActivity : Activity() {
         }
         col.addView(card("API ключ", label("developer.clashroyale.com → My Account → Create Key", 12f).apply { setPadding(0, dp(6), 0, 0) }, keyEt, ipTv), lp(14))
 
+        // Область ника
+        topEt = input("0", p.getInt("top", 0).toString(), true)
+        botEt = input("15", p.getInt("bottom", 15).toString(), true)
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val l = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label("Сверху, %")); addView(topEt)
+            }
+            val r = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(label("Снизу, %")); addView(botEt)
+            }
+            addView(l, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { rightMargin = dp(6) })
+            addView(r, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(6) })
+        }
+        col.addView(card("Область ника на экране",
+            label("Какая часть экрана (по высоте) читается. Подбери, если ник читается неверно.", 12f).apply { setPadding(0, dp(6), 0, dp(4)) },
+            row), lp(14))
+
         // Кнопки
         val b1 = btn("1. Разрешить поверх экрана", false).apply {
             setOnClickListener {
@@ -205,6 +227,8 @@ class MainActivity : Activity() {
     private fun save() {
         getSharedPreferences("cr", MODE_PRIVATE).edit()
             .putString("key", keyEt.text.toString().trim())
+            .putInt("top", topEt.text.toString().toIntOrNull() ?: 0)
+            .putInt("bottom", botEt.text.toString().toIntOrNull() ?: 15)
             .apply()
     }
 
