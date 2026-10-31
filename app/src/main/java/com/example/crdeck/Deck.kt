@@ -1,6 +1,7 @@
 package com.example.crdeck
 
 import android.graphics.*
+import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -21,14 +22,13 @@ object DeckFinder {
         val c = URL(url).openConnection() as HttpURLConnection
         c.connectTimeout = 10000
         c.readTimeout = 15000
-        c.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36")
         if (key != null) c.setRequestProperty("Authorization", "Bearer $key")
         val code = c.responseCode
         if (code != 200) throw Exception("HTTP $code")
         return c.inputStream.bufferedReader().use { it.readText() }
     }
 
-    private fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+    fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 
     private fun lev(a: String, b: String): Int {
         var prev = IntArray(b.length + 1) { it }
@@ -47,6 +47,18 @@ object DeckFinder {
         val x = norm(a); val y = norm(b)
         if (x.isEmpty() || y.isEmpty()) return false
         return lev(x, y) <= maxOf(1, y.length / 4)
+    }
+
+    // Надписи «нет клана» на разных языках (включая то, как их портит OCR)
+    private val noClan = listOf(
+        "неклане", "noclan", "notinaclan", "notinclan", "sinclan", "keinclan", "pasdeclan",
+        "senzaclan", "semcla", "klanyok", "kjiahe", "无部落", "クランなし", "클랜없음", "ليسفيعشيرة", "بلاعشيرة"
+    )
+
+    fun isNoClan(s: String): Boolean {
+        val n = norm(s)
+        if (n.isEmpty()) return true
+        return noClan.any { n.contains(it) || (n.length < 16 && lev(n, it) <= 2) }
     }
 
     private fun findInClan(key: String, nick: String, clan: String): String? {
@@ -68,24 +80,56 @@ object DeckFinder {
         return null
     }
 
-    // Запасной вариант без клана: поиск на сайте RoyaleAPI (может блокироваться Cloudflare)
-    private fun findBySite(key: String, nick: String): String? {
-        val html = get("https://royaleapi.com/players/search?q=${enc(nick)}", null)
-        val tags = Regex("/player/([0-9A-Z]{4,})").findAll(html).map { it.groupValues[1] }.distinct().take(6).toList()
-        for (t in tags) {
-            try {
-                val name = JSONObject(get("$BASE/players/${enc("#$t")}", key)).getString("name")
-                if (similar(name, nick)) return "#$t"
-            } catch (_: Exception) {}
+    private fun playerName(key: String, tag: String): String? =
+        try { JSONObject(get("$BASE/players/${enc(tag)}", key)).getString("name") } catch (e: Exception) { null }
+
+    private fun lastBattle(key: String, tag: String): String =
+        try { JSONArray(get("$BASE/players/${enc(tag)}/battlelog", key)).getJSONObject(0).getString("battleTime") }
+        catch (e: Exception) { "" }
+
+    // Поиск без клана: поиск по имени на сайте RoyaleAPI (через WebView, его даёт сервис)
+    private fun findGlobal(key: String, nick: String, site: (String) -> List<Pair<String, String>>): String? {
+        val urls = listOf(
+            "https://royaleapi.com/player/${Uri.encode(nick)}",
+            "https://royaleapi.com/players/search?q=${enc(nick)}"
+        )
+        for (u in urls) {
+            val res = site(u)
+            if (res.isEmpty()) continue
+            val pre = res.filter { norm(it.second).contains(norm(nick)) }.ifEmpty { res.take(5) }.take(8)
+            val ok = ArrayList<Pair<String, Int>>()
+            for ((tag, _) in pre) {
+                val name = playerName(key, tag) ?: continue
+                if (similar(name, nick)) ok.add(tag to lev(norm(name), norm(nick)))
+            }
+            if (ok.isEmpty()) continue
+            val min = ok.minOf { it.second }
+            val best = ok.filter { it.second == min }.take(4)
+            if (best.size == 1) return best[0].first
+            // несколько тёзок — берём того, кто играл позже всех
+            return best.maxByOrNull { lastBattle(key, it.first) }?.first
         }
         return null
     }
 
-    fun find(key: String, nick: String, clan: String?): List<Card> {
+    fun find(
+        key: String,
+        cands: List<Pair<String, String?>>,
+        site: (String) -> List<Pair<String, String>>
+    ): List<Card> {
         if (key.isBlank()) throw Exception("нет API ключа")
         var tag: String? = null
-        if (!clan.isNullOrBlank()) tag = try { findInClan(key, nick, clan) } catch (e: Exception) { null }
-        if (tag == null) tag = try { findBySite(key, nick) } catch (e: Exception) { null }
+        for ((nick, clan) in cands) {
+            if (clan.isNullOrBlank()) continue
+            tag = try { findInClan(key, nick, clan) } catch (e: Exception) { null }
+            if (tag != null) break
+        }
+        if (tag == null) {
+            for ((nick, _) in cands.distinctBy { norm(it.first) }.take(3)) {
+                tag = try { findGlobal(key, nick, site) } catch (e: Exception) { null }
+                if (tag != null) break
+            }
+        }
         if (tag == null) throw Exception("игрок не найден")
 
         val log = JSONArray(get("$BASE/players/${enc(tag)}/battlelog", key))

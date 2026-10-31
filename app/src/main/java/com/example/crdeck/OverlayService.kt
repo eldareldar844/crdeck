@@ -20,10 +20,12 @@ import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.*
 import android.widget.*
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import org.json.JSONArray
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
@@ -33,7 +35,6 @@ class OverlayService : Service() {
     private var vd: VirtualDisplay? = null
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
-    private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     @Volatile private var want = false
     private lateinit var status: TextView
     private lateinit var deckView: ImageView
@@ -111,26 +112,60 @@ class OverlayService : Service() {
         val y1 = bmp.height * bottom / 100
         val crop = Bitmap.createBitmap(bmp, 0, y0, bmp.width, y1 - y0)
         setStatus("читаю экран…")
-        recognizer.process(InputImage.fromBitmap(crop, 0))
-            .addOnSuccessListener { res ->
-                val lines = res.textBlocks.flatMap { it.lines }.map { it.text.trim() }
-                    .filter { it.length >= 2 && !Regex("^[\\d:\\s.,/]+$").matches(it) }
-                val nick = lines.getOrNull(0)
-                val clan = lines.getOrNull(1)
-                if (nick == null) { setStatus("ник не найден"); return@addOnSuccessListener }
-                setStatus("$nick | ${clan ?: "—"}")
+        bg.execute {
+            try {
+                val cands = Ocr.candidates(this, crop) { setStatus(it) }
+                if (cands.isEmpty()) { setStatus("ник не найден"); return@execute }
+                setStatus("${cands[0].first} | ${cands[0].second ?: "нет клана"}")
                 val key = prefs.getString("key", "") ?: ""
-                bg.execute {
+                val cards = DeckFinder.find(key, cands) { url -> webSearch(url) }
+                val deck = DeckImage.compose(cards)
+                main.post { showDeck(deck) }
+            } catch (e: Exception) {
+                setStatus("✖ ${e.message}")
+            }
+        }
+    }
+
+    private val jsLinks = "(function(){return JSON.stringify(Array.from(document.querySelectorAll('a[href]'))" +
+        ".map(function(a){return [a.getAttribute('href'),(a.textContent||'').trim()]}))})()"
+
+    // Загружает страницу поиска RoyaleAPI в скрытом WebView (проходит защиту сайта) и возвращает (#тег, текст ссылки)
+    private fun webSearch(url: String): List<Pair<String, String>> {
+        val latch = CountDownLatch(1)
+        val out = ArrayList<Pair<String, String>>()
+        main.post {
+            val wv = WebView(this)
+            wv.settings.javaScriptEnabled = true
+            wv.settings.domStorageEnabled = true
+            var started = false
+            var tries = 0
+            val tagRe = Regex("^/player/([0289PYLQGRJCUV]{3,})/?$")
+            fun finish() { try { wv.destroy() } catch (_: Exception) {}; latch.countDown() }
+            fun poll() {
+                wv.evaluateJavascript(jsLinks) { v ->
                     try {
-                        val cards = DeckFinder.find(key, nick, clan)
-                        val deck = DeckImage.compose(cards)
-                        main.post { showDeck(deck) }
-                    } catch (e: Exception) {
-                        setStatus("✖ ${e.message}")
-                    }
+                        val arr = JSONArray(JSONArray("[$v]").getString(0))
+                        val seen = HashSet<String>()
+                        for (i in 0 until arr.length()) {
+                            val a = arr.getJSONArray(i)
+                            val m = tagRe.find(a.getString(0)) ?: continue
+                            if (seen.add(m.groupValues[1])) out.add(("#" + m.groupValues[1]) to a.getString(1))
+                        }
+                    } catch (_: Exception) {}
+                    tries++
+                    if (out.isNotEmpty() || tries > 10) finish() else main.postDelayed({ poll() }, 1000)
                 }
             }
-            .addOnFailureListener { setStatus("ошибка OCR") }
+            wv.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, u: String?) {
+                    if (!started) { started = true; poll() }
+                }
+            }
+            wv.loadUrl(url)
+        }
+        latch.await(30, TimeUnit.SECONDS)
+        return ArrayList(out)
     }
 
     private fun setStatus(t: String) { main.post { status.text = t } }
